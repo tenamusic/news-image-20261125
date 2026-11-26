@@ -1,60 +1,68 @@
 #!/usr/bin/env python3
-"""news-image-20261125 entrypoint.
+"""Entrypoint for the make.fun news-image-20261125 entry.
 
-Copies the bundled front-page image (entry.png, 1024x1024, rendered from
-Wednesday 25 November 2026's sourced news by render25.py) to the output
-path, after verifying it is a whole, in-limits PNG: correct magic, an
-IHDR first chunk, an exact IEND trailer, the declared 1024x1024
-dimensions, and at most 1 MiB. No network, no randomness, no clock:
-the same bytes are written on every run.
+The picture itself is the deliverable: this program validates the
+bundled entry.png (intact PNG, contest size limits) and copies it to
+the output directory the runner provides.
 """
+
 import os
 import struct
 import sys
+import zlib
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SOURCE = os.path.join(HERE, "entry.png")
-MAX_BYTES = 1048576
-WANT_W, WANT_H = 1024, 1024
+LIMIT_BYTES = 1024 * 1024
+EXPECTED_WIDTH = 1024
+EXPECTED_HEIGHT = 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-IEND_TRAILER = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+IEND_TAIL = b"IEND\xaeB`\x82"
 
 
 def fail(message):
-    print("error: " + message, file=sys.stderr)
+    print(f"entry: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
-def load_checked():
-    try:
-        with open(SOURCE, "rb") as fh:
-            data = fh.read()
-    except OSError as exc:
-        fail("cannot read bundled entry.png: %s" % exc)
-    if len(data) > MAX_BYTES:
-        fail("entry.png is %d bytes, over the 1 MiB limit" % len(data))
-    if data[:8] != PNG_MAGIC:
-        fail("entry.png is not a PNG (bad magic)")
-    if data[12:16] != b"IHDR":
-        fail("entry.png has no IHDR first chunk")
-    if not data.endswith(IEND_TRAILER):
-        fail("entry.png has no exact IEND trailer")
+def load_image_bytes():
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "entry.png")
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def check_image(data):
+    if len(data) > LIMIT_BYTES:
+        fail(f"entry.png is {len(data)} bytes, over the {LIMIT_BYTES} byte limit")
+    if not data.startswith(PNG_MAGIC):
+        fail("entry.png does not start with the PNG signature")
+    if not data.endswith(IEND_TAIL):
+        fail("entry.png does not end with a complete IEND chunk")
+    # The first chunk must be a 13-byte IHDR: length(4) type(4) data(13).
+    ihdr_length, ihdr_type = struct.unpack(">I4s", data[8:16])
+    if ihdr_type != b"IHDR" or ihdr_length != 13:
+        fail("the first chunk is not a 13-byte IHDR")
     width, height = struct.unpack(">II", data[16:24])
-    if (width, height) != (WANT_W, WANT_H):
-        fail("entry.png is %dx%d, want 1024x1024" % (width, height))
-    return data, width, height
+    if width != EXPECTED_WIDTH or height != EXPECTED_HEIGHT:
+        fail(f"entry.png is {width}x{height}, expected "
+             f"{EXPECTED_WIDTH}x{EXPECTED_HEIGHT}")
+    # The IHDR CRC sits right after its 13 data bytes (offset 29..33)
+    # and covers the chunk type plus data (offset 12..29).
+    stored_crc, = struct.unpack(">I", data[29:33])
+    if zlib.crc32(data[12:29]) & 0xFFFFFFFF != stored_crc:
+        fail("the IHDR CRC does not match its contents")
 
 
 def main():
-    data, width, height = load_checked()
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    data = load_image_bytes()
+    check_image(data)
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     os.makedirs(out_dir, exist_ok=True)
     target = os.path.join(out_dir, "entry.png")
-    with open(target, "wb") as fh:
-        fh.write(data)
+    with open(target, "wb") as handle:
+        handle.write(data)
     if os.path.getsize(target) != len(data):
-        fail("written file size does not match the bundled image")
-    print("wrote %s (%d bytes, %dx%d)" % (target, len(data), width, height))
+        fail("the written file does not match the source size")
+    print(f"wrote {target} ({len(data)} bytes)")
 
 
 if __name__ == "__main__":
